@@ -2,8 +2,10 @@
 
 namespace IDCT\NatsMessenger\Tests\Unit\Options;
 
+use IDCT\NATS\Auth\NkeySeedSigner;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\JetStream\Enum\DiscardPolicy;
 use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\Enum\RetentionPolicy;
@@ -15,11 +17,15 @@ use IDCT\NatsMessenger\Options\StreamCompression;
 use IDCT\NatsMessenger\Options\TransportOption;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
 final class NatsTransportConfigurationBuilderTest extends TestCase
 {
     private const VALID_DSN = 'nats://admin:password@localhost:4222/test-stream/test-topic';
+
+    private const TEST_NKEY_SEED = 'SUAANUDRLXQXVVCRIMOAGGDTAYN2CGCU737QZ2MKOLEVBR6RPDZKNGXT6A';
+    private const TEST_NKEY_PUBLIC = 'UA4XDK2I75UAGJO5XDZBYLLOAJTFMHWHVOV7SQBEX2DZ3XUCRRUCS2DJ';
 
     public function testBuildWithValidDsnReturnsConfiguration(): void
     {
@@ -226,8 +232,143 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame('api-token', $options->token);
         self::assertSame('jwt-value', $options->jwt);
         self::assertSame('nkey-value', $options->nkey);
+        self::assertNull($options->nonceSigner);
         self::assertSame('override-user', $options->username);
         self::assertSame('override-password', $options->password);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildWithNkeySeedPassesASignerAndTheSeedsPublicKey(): void
+    {
+        $configuration = (new NatsTransportConfigurationBuilder())->build(
+            'nats://localhost:4222/test-stream/test-topic',
+            ['nkey_seed' => self::TEST_NKEY_SEED]
+        );
+
+        $options = $this->extractNatsOptions($configuration->client);
+
+        self::assertInstanceOf(NkeySeedSigner::class, $options->nonceSigner);
+        self::assertSame(self::TEST_NKEY_PUBLIC, $options->nonceSigner->publicKey());
+        self::assertSame(self::TEST_NKEY_PUBLIC, $options->nkey);
+        self::assertNull($options->username);
+        self::assertNull($options->password);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildReadsTheNkeySeedFromTheDsnQuery(): void
+    {
+        $configuration = (new NatsTransportConfigurationBuilder())->build(
+            'nats://localhost:4222/test-stream/test-topic?nkey_seed=' . self::TEST_NKEY_SEED,
+            []
+        );
+
+        $options = $this->extractNatsOptions($configuration->client);
+
+        self::assertInstanceOf(NkeySeedSigner::class, $options->nonceSigner);
+        self::assertSame(self::TEST_NKEY_PUBLIC, $options->nkey);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildAcceptsAnNkeyThatIsTheSeedsPublicKey(): void
+    {
+        $configuration = (new NatsTransportConfigurationBuilder())->build(
+            'nats://localhost:4222/test-stream/test-topic',
+            ['nkey_seed' => self::TEST_NKEY_SEED, 'nkey' => self::TEST_NKEY_PUBLIC]
+        );
+
+        self::assertSame(self::TEST_NKEY_PUBLIC, $this->extractNatsOptions($configuration->client)->nkey);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildRejectsAnNkeyThatIsNotTheSeedsPublicKey(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The nkey option "UOTHERPUBLICKEY" is not the public key of the configured NKey seed.');
+
+        (new NatsTransportConfigurationBuilder())->build(
+            'nats://localhost:4222/test-stream/test-topic',
+            ['nkey_seed' => self::TEST_NKEY_SEED, 'nkey' => 'UOTHERPUBLICKEY']
+        );
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function optionsWithAnNkey(): iterable
+    {
+        yield 'nkey alone' => [['nkey' => self::TEST_NKEY_PUBLIC]];
+        yield 'nkey repeating the seed\'s public key' => [['nkey' => self::TEST_NKEY_PUBLIC, 'nkey_seed' => self::TEST_NKEY_SEED]];
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    #[RequiresPhpExtension('sodium')]
+    #[DataProvider('optionsWithAnNkey')]
+    public function testTheNkeyOptionIsDeprecated(array $options): void
+    {
+        $deprecations = [];
+        set_error_handler(static function (int $severity, string $message) use (&$deprecations): bool {
+            if ($severity === E_USER_DEPRECATED) {
+                $deprecations[] = $message;
+            }
+
+            return true;
+        });
+
+        try {
+            (new NatsTransportConfigurationBuilder())->build('nats://localhost:4222/test-stream/test-topic', $options);
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertSame([
+            'Since idct/symfony-nats-messenger 5.8: The "nkey" option is deprecated and will be removed in 6.0. '
+            . 'The public key is derived from "nkey_seed": configure only the seed.',
+        ], $deprecations);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildWithNkeySeedAloneTriggersNoDeprecation(): void
+    {
+        $deprecations = [];
+        set_error_handler(static function (int $severity, string $message) use (&$deprecations): bool {
+            if ($severity === E_USER_DEPRECATED) {
+                $deprecations[] = $message;
+            }
+
+            return true;
+        });
+
+        try {
+            (new NatsTransportConfigurationBuilder())->build(
+                'nats://localhost:4222/test-stream/test-topic',
+                ['nkey_seed' => self::TEST_NKEY_SEED]
+            );
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertSame([], $deprecations);
+    }
+
+    #[RequiresPhpExtension('sodium')]
+    public function testBuildRejectsAnInvalidNkeySeedWithoutRepeatingIt(): void
+    {
+        // The test seed with its last character changed, so it no longer decodes.
+        $invalidSeed = substr(self::TEST_NKEY_SEED, 0, -1) . 'B';
+
+        try {
+            (new NatsTransportConfigurationBuilder())->build(
+                'nats://localhost:4222/test-stream/test-topic',
+                ['nkey_seed' => $invalidSeed]
+            );
+            self::fail('An invalid NKey seed was accepted.');
+        } catch (InvalidArgumentException $invalid) {
+            self::assertStringStartsWith('The NKey seed cannot be used: ', $invalid->getMessage());
+            self::assertStringNotContainsString($invalidSeed, $invalid->getMessage());
+            self::assertInstanceOf(NatsException::class, $invalid->getPrevious());
+        }
     }
 
     public function testBuildUsesDsnCredentialsAndDefaultPortWhenOverridesAreAbsent(): void

@@ -521,10 +521,50 @@ framework:
           username: null                    # Overrides DSN username if provided
           password: null                    # Overrides DSN password if provided
           jwt: null                         # JWT authentication value
-          nkey: null                        # NKey public value
+          nkey: null                        # Deprecated since 5.8 (removed in 6.0): the public key is
+                                            # derived from nkey_seed
+          nkey_seed: null                   # NKey seed (SU...) that signs the server's nonce; see NKey Authentication
 ```
 
 > **Tested by:** `testReadmeConfigurationOptionsAreAccepted` (all options above), `testReadmeBatchingExamplesAreAccepted`, `testReadmeTimeoutExamplesAreAccepted`, `testReadmeStreamRetentionExamplesAreAccepted`, `testBuildAcceptsAndNormalizesNewStreamAndConsumerOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testBuildWithTlsAndAuthOptionsPropagatesToNatsOptions`, `testTlsVerifyPeerStaysOnUnlessExplicitlyDisabled`, `testTlsVerifyPeerInTheDsnStaysOnUnlessExplicitlyDisabled`, `testBuildAcceptsStreamPlacementOptions`, `testBuildWithReconnectOptionsPropagatesToNatsOptions`
+
+### NKey Authentication
+
+A NATS user can authenticate with an NKey instead of a password. The server keeps only the user's public key
+(`U...`), and the client proves it holds the matching seed (`SU...`) by signing a nonce the server sends in its
+`INFO`.
+
+Give the transport the seed in `nkey_seed`, and leave the user and password out of the DSN:
+
+```yaml
+framework:
+    messenger:
+        transports:
+            orders:
+                dsn: 'nats-jetstream://nats.example.com:4222/orders/orders.created'
+                options:
+                    nkey_seed: '%env(NATS_NKEY_SEED)%'
+                    # a seed kept in a file (e.g. a mounted secret), its path in NATS_NKEY_SEED_FILE:
+                    # nkey_seed: '%env(trim:file:NATS_NKEY_SEED_FILE)%'
+```
+
+On the server, the user is the public key:
+
+```
+authorization {
+    users = [ { nkey: UA4XDK2I75UAGJO5XDZBYLLOAJTFMHWHVOV7SQBEX2DZ3XUCRRUCS2DJ } ]
+}
+```
+
+- `nk -gen user -pubout` creates a key pair: the first line is the seed, the second the public key.
+- The seed is all the transport needs: the public key it sends is derived from it. The `nkey` option is deprecated
+  since 5.8 and will be removed in 6.0. Until then it may repeat the derived key, but a different one is refused when
+  the transport is built, not on its first connect.
+- Signing needs the `sodium` extension, bundled with PHP since 7.2 and included in most builds. Without it the
+  transport fails when it is built.
+- The seed works in the DSN query too (`?nkey_seed=SU...`)
+
+> **Tested by:** `testBuildWithNkeySeedPassesASignerAndTheSeedsPublicKey`, `testBuildReadsTheNkeySeedFromTheDsnQuery`, `testBuildAcceptsAnNkeyThatIsTheSeedsPublicKey`, `testBuildRejectsAnNkeyThatIsNotTheSeedsPublicKey`, `testTheNkeyOptionIsDeprecated`, `testBuildWithNkeySeedAloneTriggersNoDeprecation`, `testBuildRejectsAnInvalidNkeySeedWithoutRepeatingIt`, Behat scenario `Messages are sent and consumed by a user that authenticates with an NKey seed`
 
 ### Retry Handler Behavior
 

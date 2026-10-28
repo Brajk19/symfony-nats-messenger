@@ -49,6 +49,9 @@ class NatsSetupContext implements Context
     /** The serializer service the igbinary steps give a transport's `serializer:` key: the README's value. */
     private const IGBINARY_SERIALIZER = IgbinarySerializer::class;
 
+    /** Seed of the NKey user in tests/nats/nats.conf, generated with `nk -gen user -pubout` for the tests only. */
+    private const TEST_NKEY_SEED = 'SUAANUDRLXQXVVCRIMOAGGDTAYN2CGCU737QZ2MKOLEVBR6RPDZKNGXT6A';
+
     private ?Process $natsProcess = null;
     private ?Process $setupProcess = null;
     private ?Process $consumerProcess = null;
@@ -1572,6 +1575,24 @@ class NatsSetupContext implements Context
             $this->testStreamName,
             $this->testSubject,
             $consumerName
+        );
+
+        file_put_contents(__DIR__ . '/../../config/packages/test_messenger.yaml', $configContent);
+        $this->resetSymfonyCache();
+    }
+
+    /**
+     * No user or password in the DSN: the connection authenticates only with the NKey seed, whose public key is
+     * the NKey user in tests/nats/nats.conf. The seed goes in the transport's options, as the README recommends.
+     */
+    #[Given('I have a messenger transport configured with an NKey seed')]
+    public function iHaveAMessengerTransportConfiguredWithAnNkeySeed(): void
+    {
+        $configContent = sprintf(
+            "framework:\n    messenger:\n        transports:\n            test_transport:\n                dsn: 'nats-jetstream://localhost:4222/%s/%s?stream_max_age=900'\n                options:\n                    nkey_seed: '%s'\n                serializer: 'messenger.transport.native_php_serializer'\n        routing:\n            'App\\Async\\TestMessage': test_transport\n",
+            $this->testStreamName,
+            $this->testSubject,
+            self::TEST_NKEY_SEED
         );
 
         file_put_contents(__DIR__ . '/../../config/packages/test_messenger.yaml', $configContent);

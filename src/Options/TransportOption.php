@@ -82,7 +82,9 @@ enum TransportOption: string
 
     case TOKEN = 'token';
     case JWT = 'jwt';
+    /** @deprecated since 5.8, removed in 6.0: the public key is derived from {@see self::NKEY_SEED}. */
     case NKEY = 'nkey';
+    case NKEY_SEED = 'nkey_seed';
     case USERNAME = 'username';
     case PASSWORD = 'password';
 }

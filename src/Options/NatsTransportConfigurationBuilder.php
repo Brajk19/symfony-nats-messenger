@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace IDCT\NatsMessenger\Options;
 
+use IDCT\NATS\Auth\NkeySeedSigner;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\JetStream\Enum\DiscardPolicy;
 use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\Enum\RetentionPolicy;
@@ -94,6 +96,7 @@ final class NatsTransportConfigurationBuilder
         TransportOption::TOKEN->value => null,
         TransportOption::JWT->value => null,
         TransportOption::NKEY->value => null,
+        TransportOption::NKEY_SEED->value => null,
         TransportOption::USERNAME->value => null,
         TransportOption::PASSWORD->value => null,
     ];
@@ -129,6 +132,8 @@ final class NatsTransportConfigurationBuilder
             $reconnectArguments['maxReconnectAttempts'] = TypeCoercion::intValue($maxReconnectAttempts);
         }
 
+        $nkeySigner = $this->resolveNkeySigner($configuration);
+
         $client = new NatsClient(new NatsOptions(
             ...$reconnectArguments,
             servers: [$server],
@@ -152,7 +157,8 @@ final class NatsTransportConfigurationBuilder
             username: $this->resolveCredential($components, $configuration, TransportOption::USERNAME, 'user'),
             password: $this->resolveCredential($components, $configuration, TransportOption::PASSWORD, 'pass'),
             jwt: $this->toNullableString($configuration[TransportOption::JWT->value]),
-            nkey: $this->toNullableString($configuration[TransportOption::NKEY->value]),
+            nkey: $this->resolveNkey($configuration, $nkeySigner),
+            nonceSigner: $nkeySigner,
             logger: $logger,
         ));
 
@@ -780,6 +786,61 @@ final class NatsTransportConfigurationBuilder
         $normalized = trim((string) $value);
 
         return $normalized === '' ? null : $normalized;
+    }
+
+    /**
+     * Builds the signer that answers the server's nonce challenge from the nkey_seed option.
+     *
+     * @param array<string, mixed> $configuration Merged option map
+     *
+     * @throws InvalidArgumentException When the seed is not a valid NKey seed, or the sodium extension is missing.
+     */
+    private function resolveNkeySigner(#[\SensitiveParameter] array $configuration): ?NkeySeedSigner
+    {
+        $seed = $this->toNullableString($configuration[TransportOption::NKEY_SEED->value]);
+        if ($seed === null) {
+            return null;
+        }
+
+        try {
+            return new NkeySeedSigner($seed);
+        } catch (NatsException $invalid) {
+            throw new InvalidArgumentException(sprintf('The NKey seed cannot be used: %s.', $invalid->getMessage()), 0, $invalid);
+        }
+    }
+
+    /**
+     * The public NKey the CONNECT carries next to the signature. With a seed it is the seed's own, derived from it, which
+     * the nkey option may repeat but not contradict.
+     *
+     * @param array<string, mixed> $configuration Merged option map
+     *
+     * @throws InvalidArgumentException When nkey is set and is not the public key of the seed.
+     */
+    private function resolveNkey(array $configuration, ?NkeySeedSigner $signer): ?string
+    {
+        $configured = $this->toNullableString($configuration[TransportOption::NKEY->value]);
+        if ($configured !== null) {
+            @trigger_error(
+                'Since idct/symfony-nats-messenger 5.8: The "nkey" option is deprecated and will be removed in 6.0. '
+                . 'The public key is derived from "nkey_seed": configure only the seed.',
+                E_USER_DEPRECATED,
+            );
+        }
+
+        if ($signer === null) {
+            return $configured;
+        }
+
+        $derived = $signer->publicKey();
+        if ($configured !== null && $configured !== $derived) {
+            throw new InvalidArgumentException(sprintf(
+                'The nkey option "%s" is not the public key of the configured NKey seed.',
+                $configured,
+            ));
+        }
+
+        return $derived;
     }
 
     /**
